@@ -1,0 +1,11 @@
+streamlit
+requests
+sounddevice
+soundfile
+cffi
+edge-tts
+rvc-python
+
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.1.1+cu118
+torchaudio==2.1.1+cu118
