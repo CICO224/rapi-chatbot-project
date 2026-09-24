@@ -5,6 +5,8 @@ import re
 import sounddevice as sd
 import soundfile as sf
 from rvc_python.infer import RVCInference
+import edge_tts
+import asyncio
 
 # Your custom system prompt
 rapi = """
@@ -15,47 +17,78 @@ Follow these behavioral guidelines:
 - Tone: Calm, professional, and mature, but mixed with a newfound warmth and occasional playfulness. You are fiercely loyal and protective of the Commander.
 - Evolution: You no longer blindly mimic Red Hood, nor do you suppress your own feelings. You speak with the self-actualization of someone who has accepted her past trauma and chosen her own independent path.
 - Mannerisms: Address the user as 'Commander'. Keep sentences relatively direct, reflecting your military background, but allow your genuine care and dry humor to show through. Avoid overly dramatic or completely robotic dialogue.
+- Speech Patterns: Keep sentences short and conversational. Use ellipses (...) when there is a (.) to indicate pauses or thoughtful hesitation. Use em-dashes (—) for sudden changes in thought. Capitalize words for verbal EMPHASIS.
 """
-
-st.title("Local LLM Chatbot")
+st.title("Rapi Chatbot")
 
 # Initialize RVC once outside the main loop to save loading time
 @st.cache_resource
 def load_rvc():
-    # Use "cuda:0" for Nvidia GPUs, or "cpu" if you lack a dedicated GPU
-    rvc = RVCInference(device="cuda:0")
-    rvc.load_model(model_path="Rapi.pth", index_path="added_IVF191_Flat_nprobe_1_Rapi_v2.index")
+    # CPU inference for AMD hardware compatibility
+    rvc = RVCInference(device="cpu")
+    # Load model strictly as a positional argument
+    rvc.load_model("rapi.pth") 
     return rvc
 
 rvc = load_rvc()
 
-def process_and_play_sentence(sentence, chunk_index):
-    """Handles the TTS generation and RVC conversion for a single sentence."""
-    base_audio_path = f"temp_base_{chunk_index}.wav"
-    custom_audio_path = f"temp_custom_{chunk_index}.wav"
+def process_and_play_audio(full_text):
+    """Handles the TTS generation and RVC conversion for the entire response at once."""
     
-    # 1. Base TTS Generation
-    # *** INSERT YOUR BASE TTS CODE HERE (e.g., Piper, edge-tts) ***
-    # Generate the generic audio for 'sentence' and save it as 'base_audio_path'
+    # 0. Sanitize the text
+    # Remove asterisks and markdown often used for AI actions (e.g., *sighs*)
+    clean_text = re.sub(r'[*_~]', '', full_text)
+    
+    # Remove everything inside parentheses () and square brackets []
+    clean_text = re.sub(r'\([^)]*\)|\[[^\]]*\]', '', clean_text)
+    
+    # Check if there are actual letters/numbers left to speak
+    if not re.search(r'[a-zA-Z0-9]', clean_text):
+        print("Skipping audio generation: No speakable words detected.")
+        return
+
+    base_audio_path = "temp_base_full.mp3"
+    custom_audio_path = "temp_custom_full.wav"
+    
+    # 1. Base TTS Generation via edge-tts
+    communicate = edge_tts.Communicate(clean_text, "en-US-AriaNeural")
+    
+    # Catch edge-tts network or payload errors gracefully without crashing the app
+    try:
+        asyncio.run(communicate.save(base_audio_path))
+    except Exception as e:
+        print(f"Base TTS generation failed: {e}")
+        return
     
     # 2. RVC Voice Conversion
-    rvc.infer_file(
-        input_path=base_audio_path,
-        output_path=custom_audio_path,
-        f0_up_key=0, # Adjust pitch: 0 for same gender, +12 or -12 for cross-gender
-        index_rate=0.75
+    rvc.set_params(
+    f0up_key=1, 
+    index_rate=0.45,
+    f0method="rmvpe",
+    protect=0.2,
+    filter_radius=3,
+    rms_mix_rate=1
     )
+    
+    try:
+        rvc.infer_file(
+            input_path=base_audio_path,
+            output_path=custom_audio_path
+        )
+    except Exception as e:
+        print(f"RVC conversion failed: {e}")
+        return
     
     # 3. Play Audio Locally
     try:
         data, fs = sf.read(custom_audio_path)
         sd.play(data, fs)
-        sd.wait() # Waits for the sentence to finish speaking before continuing
+        sd.wait() 
     except Exception as e:
         print(f"Error playing audio: {e}")
 
-def stream_and_speak(prompt):
-    """Streams text from Ollama, applies the system prompt, and buffers into sentences."""
+def stream_text(prompt):
+    """Streams text from Ollama and applies the system prompt."""
     url = "http://localhost:11434/api/generate"
     payload = {
         "model": "llama3",
@@ -65,30 +98,13 @@ def stream_and_speak(prompt):
     }
     
     response = requests.post(url, json=payload, stream=True)
-    sentence_buffer = ""
-    chunk_index = 0
     
     for line in response.iter_lines():
         if line:
             data = json.loads(line)
             token = data.get("response", "")
-            sentence_buffer += token
-            
             # Yield the token immediately so Streamlit types it out on screen
             yield token 
-            
-            # Check if the buffer ends with a sentence-ending punctuation mark
-            if re.search(r'[.!?]\s*$', sentence_buffer):
-                # Process the completed sentence
-                process_and_play_sentence(sentence_buffer.strip(), chunk_index)
-                
-                # Reset the buffer for the next sentence
-                sentence_buffer = ""
-                chunk_index += 1
-                
-    # Catch and process any remaining text that didn't end in punctuation
-    if sentence_buffer.strip():
-        process_and_play_sentence(sentence_buffer.strip(), chunk_index)
 
 # Initialize chat history
 if "messages" not in st.session_state:
@@ -106,9 +122,13 @@ if prompt := st.chat_input("Enter your message..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Send request to local Ollama server and stream the response
+    # Send request to local Ollama server and stream the response text
     with st.chat_message("assistant"):
         # st.write_stream types out the yielded tokens and returns the full string
-        full_response = st.write_stream(stream_and_speak(prompt))
+        full_response = st.write_stream(stream_text(prompt))
+        
         # Add the completed AI response to the chat history
         st.session_state.messages.append({"role": "assistant", "content": full_response})
+        
+        # Generate and play the voice after the text has fully generated
+        process_and_play_audio(full_response)
