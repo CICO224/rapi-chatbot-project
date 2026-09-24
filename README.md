@@ -1,4 +1,4 @@
-# ChatBot (Personal Project)
+# Rapi Chatbot
 
 ## Overview
 
@@ -75,7 +75,3 @@ streamlit run app.py
 ```
 
 A new tab will automatically open in your web browser. Type your message, and the AI will begin printing its response and speaking through your computer's default audio output device.
-
-```
-
-```
