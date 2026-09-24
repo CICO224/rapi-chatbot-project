@@ -1,21 +1,21 @@
+```markdown
 # ChatBot (Personal Project)
 
 ## Overview
 
-A fully local, privacy-respecting AI chatbot featuring a custom personality and real-time custom voice responses. This project combines Meta's Llama 3 model (run locally via Ollama) with a Streamlit web interface and a Retrieval-based Voice Conversion (RVC) pipeline. As the AI generates text, it buffers the response sentence-by-sentence to instantly synthesize and play a custom AI voice over your local speakers.
+A fully local, privacy-respecting AI chatbot featuring a custom personality and real-time custom voice responses. This project combines Meta's Llama 3 model (run locally via Ollama) with a Streamlit web interface and a Retrieval-based Voice Conversion (RVC) pipeline. The AI streams the generated text to the screen and instantly synthesizes a custom AI voice over your local speakers using `edge-tts`.
 
 ## Key Features
 
 * **100% Local Execution:** No cloud APIs or subscription fees. Runs entirely on your local hardware.
-* **Live Chunked Audio:** Uses Python generator streaming to speak sentences as they are generated, rather than waiting for the entire paragraph to finish.
+* **AMD / CPU Compatible:** Configured to run inference on the CPU, making it accessible for systems without NVIDIA CUDA GPUs.
 * **Custom Voice Cloning:** Integrates `rvc-python` to apply any `.pth` / `.index` custom voice model over a fast, lightweight base TTS engine.
-* **Persona Driven:** Includes a highly configurable system prompt to dictate the AI's specific character behavior and tone.
+* **Persona Driven:** Includes a highly configurable system prompt to dictate the AI's specific character behavior, speech patterns, and tone.
 
 ## Prerequisites
 
 * **Python 3.10:** This specific version is strictly required. The `fairseq` dependency used by RVC will fail to compile on Python 3.11 or Python 3.12.
 * **Ollama:** Must be installed on your system to serve the local LLM.
-* **Nvidia GPU (Highly Recommended):** CPU inference for the RVC voice conversion will cause significant delays between sentences. A CUDA-compatible GPU is heavily recommended for a seamless "live" audio experience.
 
 ## Installation
 
@@ -55,8 +55,6 @@ pip install -r requirements.txt
 
 ```
 
-*(Note: The provided `requirements.txt` includes the CUDA 11.8 wheels for PyTorch to enable GPU acceleration. If you do not have an Nvidia GPU, remove the `--extra-index-url` and `torch` lines from the text file and install the standard CPU versions of PyTorch instead).*
-
 ## Project Structure
 
 Ensure your custom RVC voice files are placed in the root directory alongside `app.py`.
@@ -64,7 +62,9 @@ Ensure your custom RVC voice files are placed in the root directory alongside `a
 * `your_model.pth`
 * `your_model.index`
 
-Open `app.py` and update the `model_path` and `index_path` variables to match your specific filenames. You will also need to insert your preferred fast TTS engine (like Piper or edge-tts) into the designated base audio generation block in the code.
+*(Note: The `.index` file must share the exact same base name as the `.pth` file for the library to automatically detect it).*
+
+Open `app.py` and ensure the model is passed strictly as a positional argument (e.g., `rvc.load_model("your_model.pth")`).
 
 ## Usage
 
@@ -76,3 +76,7 @@ streamlit run app.py
 ```
 
 A new tab will automatically open in your web browser. Type your message, and the AI will begin printing its response and speaking through your computer's default audio output device.
+
+```
+
+```
