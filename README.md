@@ -1,4 +1,3 @@
-```markdown
 # ChatBot (Personal Project)
 
 ## Overview
