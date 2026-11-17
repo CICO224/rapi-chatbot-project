@@ -7,3 +7,6 @@ edge-tts
 rvc-python
 torch
 torchaudio
+numpy
+scipy
+noisereduce

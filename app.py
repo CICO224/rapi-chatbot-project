@@ -1,12 +1,15 @@
-import streamlit as st
-import requests
 import json
-import re
-import sounddevice as sd
-import soundfile as sf
-from rvc_python.infer import RVCInference
-import edge_tts
-import asyncio
+import os
+import time
+
+import requests
+import streamlit as st
+
+from tts_text import SentenceChunker
+from voice import VoicePipeline, load_rvc
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
 # Your custom system prompt
 rapi = """
@@ -46,85 +49,90 @@ Formatting & Immersion Rules:
 
 st.title("Rapi Chatbot")
 
-# Initialize RVC once outside the main loop to save loading time
+
 @st.cache_resource
-def load_rvc():
-    # CPU inference for AMD hardware compatibility
-    rvc = RVCInference(device="cpu")
-    # Load model strictly as a positional argument
-    rvc.load_model("rapi.pth") 
-    return rvc
+def get_voice():
+    """Load RVC and start the voice worker threads once per server process."""
+    return VoicePipeline(load_rvc())
 
-rvc = load_rvc()
 
-def process_and_play_audio(full_text):
-    """Handles the TTS generation and RVC conversion for the entire response at once."""
-    
-    # 0. Sanitize the text
-    clean_text = re.sub(r'\*[^*]*\*', '', full_text)
-    clean_text = re.sub(r'\([^)]*\)|\[[^\]]*\]', '', clean_text)
-    clean_text = re.sub(r'[_~]', '', clean_text)
-    clean_text = re.sub(r'\bNikke\b', 'Nik keh', clean_text, flags=re.IGNORECASE)
-    
-    if not re.search(r'[a-zA-Z0-9]', clean_text):
-        print("Skipping audio generation: No speakable words detected.")
-        return
+voice = get_voice()
 
-    base_audio_path = "temp_base_full.mp3"
-    custom_audio_path = "temp_custom_full.wav"
-    
-    communicate = edge_tts.Communicate(clean_text, "en-US-AriaNeural")
-    
-    try:
-        asyncio.run(communicate.save(base_audio_path))
-    except Exception as e:
-        print(f"Base TTS generation failed: {e}")
-        return
-    
-    rvc.set_params(
-        f0up_key=1, 
-        index_rate=0.78,
-        f0method="rmvpe",
-        protect=0.15,
-        filter_radius=2,
-        rms_mix_rate=0.8
+STATUS_CSS = (
+    "<style>"
+    ".rapi-status{display:flex;align-items:center;gap:8px;height:34px;font-size:0.85rem;opacity:0.75}"
+    ".rapi-dots span{display:inline-block;width:6px;height:6px;margin-right:3px;border-radius:50%;"
+    "background:currentColor;animation:rapi-blink 1.2s infinite both}"
+    ".rapi-dots span:nth-child(2){animation-delay:.2s}.rapi-dots span:nth-child(3){animation-delay:.4s}"
+    "@keyframes rapi-blink{0%,80%,100%{opacity:.2}40%{opacity:1}}"
+    ".rapi-wave{display:flex;align-items:center;gap:2px;height:30px}"
+    ".rapi-wave i{display:block;width:3px;border-radius:2px;background:#e0443a}"
+    "</style>"
+)
+
+
+def dots_html(label):
+    return (
+        f'{STATUS_CSS}<div class="rapi-status">'
+        '<span class="rapi-dots"><span></span><span></span><span></span></span>'
+        f"{label}</div>"
     )
-    
-    try:
-        rvc.infer_file(
-            input_path=base_audio_path,
-            output_path=custom_audio_path
-        )
-    except Exception as e:
-        print(f"RVC conversion failed: {e}")
-        return
-    
-    try:
-        data, fs = sf.read(custom_audio_path)
-        sd.play(data, fs)
-        sd.wait() 
-    except Exception as e:
-        print(f"Error playing audio: {e}")
 
-def stream_text(chat_history):
-    """Streams text from Ollama using the chat endpoint for memory."""
-    url = "http://localhost:11434/api/chat"
-    
-    messages = [{"role": "system", "content": rapi}] + chat_history
-    
+
+def wave_html(levels):
+    """Bars driven by the loudness of the audio that is playing right now."""
+    bars = "".join(
+        f'<i style="height:{max(2, min(30, int(level * 150)))}px"></i>' for level in levels
+    )
+    return f'{STATUS_CSS}<div class="rapi-status"><div class="rapi-wave">{bars}</div></div>'
+
+
+def show_voice_status(slot, idle_label=None):
+    """Waveform while audio is playing, dots while the next sentence is prepared."""
+    levels = voice.levels()
+    if voice.speaking and levels:
+        slot.markdown(wave_html(levels), unsafe_allow_html=True)
+    elif voice.busy:
+        slot.markdown(dots_html("Preparing voice"), unsafe_allow_html=True)
+    elif idle_label:
+        slot.markdown(dots_html(idle_label), unsafe_allow_html=True)
+    else:
+        slot.empty()
+
+
+def stream_reply(chat_history, slot):
+    """Streams text from Ollama and hands each finished sentence to the voice.
+
+    Audio for the first sentence starts while the rest is still being written.
+    """
     payload = {
-        "model": "llama3",
-        "messages": messages,
-        "stream": True 
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "system", "content": rapi}] + chat_history,
+        "stream": True,
+        "keep_alive": "30m",  # keep the model in VRAM between messages
     }
-    
-    response = requests.post(url, json=payload, stream=True)
-    
-    for line in response.iter_lines():
-        if line:
-            data = json.loads(line)
-            token = data.get("message", {}).get("content", "")
-            yield token 
+    chunker = SentenceChunker()
+    slot.markdown(dots_html("Rapi is thinking"), unsafe_allow_html=True)
+
+    with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=(5, 300)) as response:
+        response.raise_for_status()
+        got_text = False
+        for line in response.iter_lines():
+            if not line:
+                continue
+            token = json.loads(line).get("message", {}).get("content", "")
+            if not token:
+                continue
+            got_text = True
+            for sentence in chunker.feed(token):
+                voice.speak(sentence)
+            show_voice_status(slot)
+            yield token
+        if not got_text:
+            slot.empty()
+
+    for sentence in chunker.flush():
+        voice.speak(sentence)
 
 # Initialize chat history
 if "messages" not in st.session_state:
@@ -157,17 +165,35 @@ with st.sidebar:
     if st.button("🗣️ Squad Banter"):
         prompt = "Anis and Neon are slacking off again. Can you handle them?"
 
+    st.divider()
+    if st.button("⏹ Stop voice"):
+        voice.cancel()
+
 
 # Accept user input (from either the chat box OR a clicked sidebar button)
 if prompt:
+    # A new message interrupts whatever Rapi was still saying
+    voice.cancel()
+
     # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Send request to local Ollama server and stream the response text
+    # Stream the reply text; sentences are voiced as soon as they are complete
     with st.chat_message("assistant", avatar="./resources/rapi.png"):
-        full_response = st.write_stream(stream_text(st.session_state.messages))
-        
+        status = st.empty()  # thinking dots / live waveform
+        try:
+            full_response = st.write_stream(stream_reply(st.session_state.messages, status))
+        except requests.RequestException as e:
+            status.empty()
+            st.error(f"Could not reach Ollama at {OLLAMA_URL}. Is it running? ({e})")
+            st.stop()
+
         st.session_state.messages.append({"role": "assistant", "content": full_response})
-        process_and_play_audio(full_response)
+
+        # Keep the waveform alive until the last sentence has been spoken
+        while voice.busy:
+            show_voice_status(status)
+            time.sleep(0.06)
+        status.empty()
